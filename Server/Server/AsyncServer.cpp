@@ -59,7 +59,7 @@ void AsyncServer::HandleReceive(const boost::system::error_code & error, std::si
 					{
 						connections[i] = receiver_endpoint;
 
-						std::cout << "A Player has connected on ip" <<
+						std::cout << "A Player has connected on ip: " <<
 							connections[i].address().to_string() << "\n";
 						break;
 					}

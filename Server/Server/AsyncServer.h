@@ -38,7 +38,7 @@ private:
 	//boost::asio::io_service io_service;
 	boost::asio::ip::udp::socket socket;
 	boost::asio::ip::udp::endpoint receiver_endpoint;
-	boost::asio::ip::udp::endpoint connections[8];
+	boost::asio::ip::udp::endpoint connections[maxAmountofConnections];
 	boost::array<char, MESSAGESIZE> receiveBuffer;
 };
 
