@@ -8,6 +8,10 @@
 #include <boost/thread.hpp>
 #include <boost/bind.hpp>
 #include <boost/algorithm/string.hpp>
+#include <boost/timer/timer.hpp>
+
+
+#define HEADERSIZE sizeof(int)
 
 using namespace boost::asio::ip;
 using namespace std;
@@ -41,10 +45,12 @@ struct test
 enum class MsgType
 {
 	Connect,
-	Ping,
+	ClientPing,
+	ServerPing,
 	Message,
 	Snapshot,
-	Disconnect
+	Disconnect,
+	Event
 
 };
 
@@ -55,21 +61,33 @@ void WriteLoop(); //Reads input from user and writes to server
 string* BuildPrompt();
 int Receive(char* data, size_t len);
 void HandleReceive(const boost::system::error_code&, const size_t);
-void ParseConnect();
+void ParseConnect(char* data, size_t len);
 void ParsePing();
 void ParseMessage(char* data, size_t len);
 void ParseSnapshot(char* data, size_t len);
 void ParseDisconnect();
+void ParseEvent(char* data, size_t len);
 void Broadcast(string msg);
+void Broadcast(char* msg, size_t len);
+void MoveMsgHead(char*& data, size_t& len, size_t stepSize);
+int CreateHeader(MsgType type, char* data);
+int CreatePing(char* data, string msg);
+int CreateEventMessage(int msgType, string message, char* dataLocation);
+
 
 const int inputSize = 128;
 const int maxAmountofConnections = 8;
 
 udp::endpoint receiver_endpoint;
 udp::endpoint connections[8];
+string playerNames[8];
+std::clock_t startPingTime;
+double durationOfPingTime[8];
+
+
 messageQueue_ptr messageQueue(new queue<char*>);
 
-boost::mutex mtx;
+
 
 boost::asio::io_service ioService;
 boost::asio::ip::udp::socket serverSocket(ioService, boost::asio::ip::udp::endpoint(boost::asio::ip::udp::v4(), 13));
@@ -113,11 +131,61 @@ void HandleReceive(const boost::system::error_code&, size_t)
 	//sock->send_to(boost::asio::buffer("Hejhej"), receiver_endpoint, 0);
 }
 
+int CreateHeader(MsgType type, char* data)
+{
+	int msgType = static_cast<int>(type);
+	int offset = 0;
+	memcpy(data, &msgType, sizeof(int));
+	offset += sizeof(int);
+	// Check so that HEADERSIZE is correct
+	if (offset != HEADERSIZE)
+		cout << "NOOOOOOOOOO! HEADERSIZE is wrong!!";
+
+	return offset;
+}
+
+int CreateEventMessage(int msgType, string message, char* dataLocation)
+{
+	int lengthOfMsg = 0;
+
+	lengthOfMsg = message.size();
+
+	int offset = 0;
+	// Message type
+	memcpy(dataLocation + offset, &msgType, sizeof(int));
+	offset += sizeof(int);
+	// Length of string
+	memcpy(dataLocation + offset, &lengthOfMsg, sizeof(int));
+	offset += sizeof(int);
+	// Message
+	memcpy(dataLocation + offset, message.data(), lengthOfMsg * sizeof(char));
+	offset += lengthOfMsg * sizeof(char);
+
+	return offset;
+}
+
+int CreatePing(char* data, string msg)
+{
+	int length = msg.size() * sizeof(char);
+	data = new char[length + HEADERSIZE];
+	int offset = CreateHeader(MsgType::ServerPing, data);
+	
+	memcpy(data + offset, msg.data(), length);
+	offset += length;
+	return offset;
+}
+
 void ParsePing()
 {
+	char* testMsg = new char[128];
+	int testOffset = CreateEventMessage(1, "Ping recieved", testMsg);
+	
 	cout << "Parsing ping." << endl;
+
 	serverSocket.send_to(
-		boost::asio::buffer("Ping received"),
+		boost::asio::buffer(
+			testMsg,
+			testOffset),
 		receiver_endpoint,
 		0);
 }
@@ -137,9 +205,10 @@ void ParseSnapshot(char* data, size_t len)
 
 }
 
-void ParseConnect()
+void ParseConnect(char* data, size_t len)
 {
 	cout << "Parsing connection." << endl;
+	int lengthOfName = -1;
 
 	for (int i = 0; i < maxAmountofConnections; i++) {
 		if (connections[i].address() == receiver_endpoint.address()) {
@@ -150,12 +219,26 @@ void ParseConnect()
 	for (int i = 0; i < maxAmountofConnections; i++) {
 		if (connections[i].address() == boost::asio::ip::address()) {
 			connections[i] = receiver_endpoint;
-			std::string str = "Player " + to_string(i) + " connected on: " + receiver_endpoint.address().to_string();
+			
+			memcpy(&lengthOfName, data, sizeof(int));
+			MoveMsgHead(data, len, sizeof(int));
+			playerNames[i] = string(data, lengthOfName);
+			
+			cout << "This is the player connected: " << playerNames[i] << ":" << lengthOfName << endl;
+			int offset = 0;
+			char* temp = new char[sizeof(int) * 2];
+			int msgType = 0;
+			memcpy(temp, &msgType, sizeof(int));
+			offset += sizeof(int);
+			memcpy(temp + offset, &i, sizeof(int));
+			
 			serverSocket.send_to(
-				boost::asio::buffer(str),
-				receiver_endpoint,
+				boost::asio::buffer(temp, sizeof(int) * 2),
+				connections[i],
 				0);
-			Broadcast("A new player connected");
+			std::string str = "Player " + playerNames[i] + " connected on: " + receiver_endpoint.address().to_string();
+
+			Broadcast(str);
 			break;
 		}
 	}
@@ -179,12 +262,34 @@ void ParseDisconnect()
 	}
 }
 
+void ParseEvent(char* data, size_t len)
+{
+	
+	cout << string(data, len) << endl;
+
+}
+
 void Broadcast(string msg)
+{
+	char* data = new char[128];
+
+	int offset = CreateEventMessage(static_cast<int>(MsgType::Message), msg, data);
+	for (int i = 0; i < maxAmountofConnections; i++) {
+		if (connections[i].address() != boost::asio::ip::address()) {
+			serverSocket.send_to(
+				boost::asio::buffer(data, offset),
+				connections[i],
+				0);
+		}
+	}
+}
+
+void Broadcast(char* msg, size_t len)
 {
 	for (int i = 0; i < maxAmountofConnections; i++) {
 		if (connections[i].address() != boost::asio::ip::address()) {
 			serverSocket.send_to(
-				boost::asio::buffer(msg),
+				boost::asio::buffer(msg, len),
 				connections[i],
 				0);
 		}
@@ -194,45 +299,71 @@ void Broadcast(string msg)
 void ParseMessage(char* data, size_t len)
 {
 	cout << "Parsed Message." << endl;
-	//char* msg = new char[inputSize];
-	//memcpy(&msg, data + sizeof(char), len - sizeof(char));
 	messageQueue->push(data);
-	
 }
+
+void ParseServerPing()
+{
+	for (int i = 0; i < maxAmountofConnections; i++) {
+		if (connections[i].address() == receiver_endpoint.address()) {
+			durationOfPingTime[i] = 1000 * (std::clock() - startPingTime)
+				/ static_cast<double>(CLOCKS_PER_SEC);
+			break;
+		}
+	}
+}
+
+int messagesReceived = 0;
 
 void ParseMsgType(char* data, size_t len)
 {
+	// Debug
+	++messagesReceived;
+
 	// Message type 1 = Ping
 	int messageType = -1;
+	int lengthOfMsg = -1;
 	// Parse component data
 	//memcpy(&messageType, data, len);
 
-	string s = string(data, len);
-	int usedInt = s[0] - '0'; //Hax
+	memcpy(&messageType, data, sizeof(int));
+	MoveMsgHead(data, len, sizeof(int));
 
-	std::cout << "Message type nr: " << usedInt << endl;
-	std::cout << "String message: " << s << endl;
 
-	switch (static_cast<MsgType>(usedInt))
+	memcpy(&lengthOfMsg, data, sizeof(int));
+	//MoveMsgHead(data, len, sizeof(int));
+	std::cout << "Message length: " << lengthOfMsg << endl;
+	std::cout << "Message was: " << string(data + sizeof(int), lengthOfMsg) << endl;
+
+
+	switch (static_cast<MsgType>(messageType))
 	{
-	case MsgType::Ping:
+	case MsgType::ClientPing:
 		ParsePing();
+		break;
+	case MsgType::ServerPing:
+		ParseServerPing();
 		break;
 	case MsgType::Snapshot:
 		ParseSnapshot(data, len);
 		break;
 	case MsgType::Connect:
-		ParseConnect();
+		ParseConnect(data, lengthOfMsg);
 		break;
 	case MsgType::Message:
-		ParseMessage(data, len);
+		ParseMessage(data, lengthOfMsg);
 		break;
 	case MsgType::Disconnect:
 		ParseDisconnect();
 		break;
+	case MsgType::Event:
+		ParseEvent(data, lengthOfMsg);
+		break;
 	default:
 		break;
 	}
+
+	cout << "Messages received: " << messagesReceived << endl;
 
 }
 
@@ -274,7 +405,10 @@ void WriteLoop()
 		{
 			try
 			{
-				serverSocket.send_to(boost::asio::buffer(inputMsg), receiver_endpoint, 0);
+				//serverSocket.send_to(boost::asio::buffer(inputMsg), receiver_endpoint, 0);
+				startPingTime = std::clock();
+				int len = CreateEventMessage(static_cast<int>(MsgType::ServerPing), inputMsg, inputBuf);
+				Broadcast(inputBuf, len);
 			}
 			catch (const std::exception& err)
 			{
@@ -292,13 +426,22 @@ void WriteLoop()
 
 void DisplayLoop()
 {
+	int lengthOfMsg = -1;
+	std::clock_t previousePingMsg = 1000 * (std::clock() - startPingTime) / static_cast<double>(CLOCKS_PER_SEC);
+	int intervallMs = 5000;
+	char* data;
 	for (;;)
 	{
 		if (!messageQueue->empty()) 
 		{
 			try
 			{
-				cout << "This is the result: " << string((messageQueue->front())) << endl;
+				size_t len = 0; // is not used
+				data = messageQueue->front();
+				memcpy(&lengthOfMsg, data, sizeof(int));
+				MoveMsgHead(data, len, sizeof(int));
+
+				cout << "This is the result: " << string(data, lengthOfMsg) << endl;
 				messageQueue->pop();
 			}
 			catch (const std::exception& err)
@@ -307,7 +450,23 @@ void DisplayLoop()
 			}
 
 		}
+
+		double currentTime = 1000 * (std::clock() - startPingTime) / static_cast<double>(CLOCKS_PER_SEC);
+		if (intervallMs < currentTime - previousePingMsg)
+		{
+			for (size_t i = 0; i < maxAmountofConnections; i++)
+			{
+				cout << "Player " << i << "'s ping: " << durationOfPingTime[i] << endl;
+			}
+			previousePingMsg = currentTime;
+		}
 	}
+}
+
+void MoveMsgHead(char*& data, size_t& len, size_t stepSize)
+{
+	data += stepSize;
+	len -= stepSize;
 }
 
 
